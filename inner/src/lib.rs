@@ -1,7 +1,7 @@
 #![crate_type = "proc-macro"]
 #![allow(unused_imports)] // Spurious complaints about a required trait import.
 
-use syn::{self, parse, parse_macro_input, spanned::Spanned, Expr, ItemFn};
+use syn::{self, parse, parse_macro_input, spanned::Spanned, Expr, ItemFn, Pat};
 
 use proc_macro::TokenStream;
 use quote::{self, ToTokens};
@@ -202,31 +202,25 @@ mod store {
 #[proc_macro_attribute]
 pub fn memoize(attr: TokenStream, item: TokenStream) -> TokenStream {
     let func = parse_macro_input!(item as ItemFn);
+    let vis = &func.vis;
     let sig = &func.sig;
 
     let fn_name = &sig.ident.to_string();
-    let renamed_name = format!("memoized_original_{}", fn_name);
-    let map_name = format!("memoized_mapping_{}", fn_name);
+    let fn_renamed = format!("unmemoized_{fn_name}");
+    let map_name = format!("memoized_mapping_{fn_name}");
 
-    // Extracted from the function signature.
-    let input_types: Vec<Box<syn::Type>>;
-    let input_names: Vec<syn::Ident>;
-    let return_type;
-
-    match check_signature(sig) {
-        Ok((t, n)) => {
-            input_types = t;
-            input_names = n;
-        }
+    // Parse the function signature
+    let (input_types, input_names) = match check_signature(sig) {
+        Ok(parsed_sig) => parsed_sig,
         Err(e) => return e.to_compile_error().into(),
-    }
+    };
 
     let input_tuple_type = quote::quote! { (#(#input_types),*) };
 
-    match &sig.output {
-        syn::ReturnType::Default => return_type = quote::quote! { () },
-        syn::ReturnType::Type(_, ty) => return_type = ty.to_token_stream(),
-    }
+    let return_type = match &sig.output {
+        syn::ReturnType::Default => quote::quote! { () },
+        syn::ReturnType::Type(_, ty) => ty.to_token_stream(),
+    };
 
     // Parse options from macro attributes
     let options: CacheOptions = syn::parse(attr.clone()).unwrap();
@@ -251,10 +245,33 @@ pub fn memoize(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    // Rename original function.
-    let mut renamed_fn = func.clone();
-    renamed_fn.sig.ident = syn::Ident::new(&renamed_name, func.sig.span());
-    let memoized_id = &renamed_fn.sig.ident;
+    // Convert original function into closure.
+    // We do this so verbosely to make sure that we get it right.
+    let closure_fn = syn::ExprClosure {
+        attrs: func.attrs,
+        movability: None,
+        asyncness: func.sig.asyncness,
+        capture: None,
+        or1_token: syn::Token![|](func.sig.span()),
+        inputs: func
+            .sig
+            .inputs
+            .iter()
+            .cloned()
+            .map(|a| match a {
+                syn::FnArg::Typed(pat) => Pat::from(pat),
+                syn::FnArg::Receiver(_) => unreachable!(),
+            })
+            .collect(),
+        or2_token: syn::Token![|](func.sig.span()),
+        output: func.sig.output.clone(),
+        body: Box::new(syn::Expr::Block(syn::ExprBlock {
+            attrs: vec![],
+            label: None,
+            block: *func.block,
+        })),
+    };
+    let closure_ident = syn::Ident::new(&fn_renamed, func.sig.span());
 
     // Construct memoizer function, which calls the original function.
     let syntax_names_tuple = quote::quote! { (#(#input_names),*) };
@@ -283,7 +300,7 @@ pub fn memoize(attr: TokenStream, item: TokenStream) -> TokenStream {
                     return r
                 }
             }
-            let r = #memoized_id(#(#input_names.clone()),*);
+            let r = #closure_ident(#(#input_names.clone()),*);
 
             let mut hm = #store_ident.lock().unwrap();
             #memoize
@@ -300,7 +317,7 @@ pub fn memoize(attr: TokenStream, item: TokenStream) -> TokenStream {
                 return r;
             }
 
-            let r = #memoized_id(#(#input_names.clone()),*);
+            let r = #closure_ident(#(#input_names.clone()),*);
 
             #store_ident.with(|hm| {
                 let mut hm = hm.borrow_mut();
@@ -311,19 +328,19 @@ pub fn memoize(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    let vis = &func.vis;
-
-    quote::quote! {
+    let out = quote::quote! {
         #[allow(unused_variables)]
         #vis #sig {
-            #renamed_fn
+            let #closure_ident = #closure_fn;
 
             #store
-    
+
             #memoizer
         }
     }
-    .into()
+    .into();
+    println!("{out}");
+    out
 }
 
 fn check_signature(
