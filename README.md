@@ -36,16 +36,15 @@ fn main() {
 This is expanded into (with a few simplifications):
 
 ```rust
-std::thread_local! {
-  static MEMOIZED_MAPPING_HELLO : RefCell<HashMap<(String, usize), bool>> = RefCell::new(HashMap::new());
-}
+pub fn hello(arg: String, arg2: usize) -> bool {
+  std::thread_local! {
+    static MEMOIZED_MAPPING_HELLO : RefCell<HashMap<(String, usize), bool>> = RefCell::new(HashMap::new());
+  }
 
-pub fn memoized_original_hello(arg: String, arg2: usize) -> bool {
-  arg.len() % 2 == arg2
-}
+  pub fn memoized_original_hello(arg: String, arg2: usize) -> bool {
+    arg.len() % 2 == arg2
+  }
 
-#[allow(unused_variables)]
-fn hello(arg: String, arg2: usize) -> bool {
   let r = MEMOIZED_MAPPING_HELLO.with(|hm| {
     let mut hm = hm.borrow_mut();
     hm.get(&(arg.clone(), arg2.clone())).cloned()
