@@ -206,7 +206,6 @@ pub fn memoize(attr: TokenStream, item: TokenStream) -> TokenStream {
     let sig = &func.sig;
 
     let fn_name = &sig.ident.to_string();
-    let fn_renamed = format!("unmemoized_{fn_name}");
     let map_name = format!("memoized_mapping_{fn_name}");
 
     // Parse the function signature
@@ -245,33 +244,14 @@ pub fn memoize(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    // Convert original function into closure.
-    // We do this so verbosely to make sure that we get it right.
-    let closure_fn = syn::ExprClosure {
-        attrs: func.attrs,
-        movability: None,
-        asyncness: func.sig.asyncness,
-        capture: None,
-        or1_token: syn::Token![|](func.sig.span()),
-        inputs: func
-            .sig
-            .inputs
-            .iter()
-            .cloned()
-            .map(|a| match a {
-                syn::FnArg::Typed(pat) => Pat::from(pat),
-                syn::FnArg::Receiver(_) => unreachable!(),
-            })
-            .collect(),
-        or2_token: syn::Token![|](func.sig.span()),
-        output: func.sig.output.clone(),
-        body: Box::new(syn::Expr::Block(syn::ExprBlock {
-            attrs: vec![],
-            label: None,
-            block: *func.block,
-        })),
+    // Inline the original function into a simple block
+    let fn_block = func.block;
+    let inlined_fn = quote::quote! {
+        {
+            #(let #input_names = #input_names.clone();)*
+            #fn_block
+        }
     };
-    let closure_ident = syn::Ident::new(&fn_renamed, func.sig.span());
 
     // Construct memoizer function, which calls the original function.
     let syntax_names_tuple = quote::quote! { (#(#input_names),*) };
@@ -300,7 +280,7 @@ pub fn memoize(attr: TokenStream, item: TokenStream) -> TokenStream {
                     return r
                 }
             }
-            let r = #closure_ident(#(#input_names.clone()),*);
+            let r = #inlined_fn;
 
             let mut hm = #store_ident.lock().unwrap();
             #memoize
@@ -317,7 +297,7 @@ pub fn memoize(attr: TokenStream, item: TokenStream) -> TokenStream {
                 return r;
             }
 
-            let r = #closure_ident(#(#input_names.clone()),*);
+            let r = #inlined_fn;
 
             #store_ident.with(|hm| {
                 let mut hm = hm.borrow_mut();
@@ -328,19 +308,15 @@ pub fn memoize(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    let out = quote::quote! {
+    quote::quote! {
         #[allow(unused_variables)]
         #vis #sig {
-            let #closure_ident = #closure_fn;
-
             #store
 
             #memoizer
         }
     }
-    .into();
-    println!("{out}");
-    out
+    .into()
 }
 
 fn check_signature(
